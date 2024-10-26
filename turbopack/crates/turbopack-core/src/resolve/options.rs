@@ -3,7 +3,8 @@ use std::{collections::BTreeMap, future::Future, pin::Pin};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use turbo_tasks::{
-    debug::ValueDebugFormat, trace::TraceRawVcs, RcStr, TryJoinIterExt, Value, ValueToString, Vc,
+    debug::ValueDebugFormat, trace::TraceRawVcs, FxIndexSet, RcStr, ResolvedVc, TryJoinIterExt,
+    Value, ValueToString, Vc,
 };
 use turbo_tasks_fs::{glob::Glob, FileSystemPath};
 
@@ -19,6 +20,10 @@ use crate::resolve::{parse::Request, plugin::AfterResolvePlugin};
 #[derive(Hash, Debug)]
 pub struct LockedVersions {}
 
+#[turbo_tasks::value(transparent)]
+#[derive(Debug)]
+pub struct ExcludedExtensions(pub FxIndexSet<RcStr>);
+
 /// A location where to resolve modules.
 #[derive(
     TraceRawVcs, Hash, PartialEq, Eq, Clone, Debug, Serialize, Deserialize, ValueDebugFormat,
@@ -26,13 +31,12 @@ pub struct LockedVersions {}
 pub enum ResolveModules {
     /// when inside of path, use the list of directories to
     /// resolve inside these
-    Nested(Vc<FileSystemPath>, Vec<RcStr>),
-    /// look into that directory
-    Path(Vc<FileSystemPath>),
-    /// lookup versions based on lockfile in the registry filesystem
-    /// registry filesystem is assumed to have structure like
-    /// @scope/module/version/<path-in-package>
-    Registry(Vc<FileSystemPath>, Vc<LockedVersions>),
+    Nested(ResolvedVc<FileSystemPath>, Vec<RcStr>),
+    /// look into that directory, unless the request has an excluded extension
+    Path {
+        dir: Vc<FileSystemPath>,
+        excluded_extensions: Vc<ExcludedExtensions>,
+    },
 }
 
 #[derive(TraceRawVcs, Hash, PartialEq, Eq, Clone, Copy, Debug, Serialize, Deserialize)]
@@ -91,7 +95,7 @@ pub enum ResolveInPackage {
 pub enum ImportMapping {
     External(Option<RcStr>, ExternalType),
     /// An already resolved result that will be returned directly.
-    Direct(Vc<ResolveResult>),
+    Direct(ResolvedVc<ResolveResult>),
     /// A request alias that will be resolved first, and fall back to resolving
     /// the original request if it fails. Useful for the tsconfig.json
     /// `compilerOptions.paths` option and Next aliases.
@@ -148,7 +152,7 @@ impl AliasTemplate for Vc<ImportMapping> {
                 ImportMapping::PrimaryAlternative(name, context) => {
                     ReplacedImportMapping::PrimaryAlternative((*name).clone().into(), *context)
                 }
-                ImportMapping::Direct(v) => ReplacedImportMapping::Direct(*v),
+                ImportMapping::Direct(v) => ReplacedImportMapping::Direct(**v),
                 ImportMapping::Ignore => ReplacedImportMapping::Ignore,
                 ImportMapping::Empty => ReplacedImportMapping::Empty,
                 ImportMapping::Alternatives(alternatives) => ReplacedImportMapping::Alternatives(
@@ -185,7 +189,7 @@ impl AliasTemplate for Vc<ImportMapping> {
                         *context,
                     )
                 }
-                ImportMapping::Direct(v) => ReplacedImportMapping::Direct(*v),
+                ImportMapping::Direct(v) => ReplacedImportMapping::Direct(**v),
                 ImportMapping::Ignore => ReplacedImportMapping::Ignore,
                 ImportMapping::Empty => ReplacedImportMapping::Empty,
                 ImportMapping::Alternatives(alternatives) => ReplacedImportMapping::Alternatives(
@@ -338,7 +342,7 @@ async fn import_mapping_to_result(
         }
         ReplacedImportMapping::Alternatives(list) => ImportMapResult::Alternatives(
             list.iter()
-                .map(|mapping| import_mapping_to_result_boxed(*mapping, lookup_path, request))
+                .map(|mapping| Box::pin(import_mapping_to_result(*mapping, lookup_path, request)))
                 .try_join()
                 .await?,
         ),
@@ -382,18 +386,6 @@ impl ValueToString for ImportMapResult {
             ImportMapResult::NoEntry => Ok(Vc::cell("No import map entry".into())),
         }
     }
-}
-
-// This cannot be inlined within `import_mapping_to_result`, otherwise we run
-// into the following error:
-//     cycle detected when computing type of
-//     `resolve::options::import_mapping_to_result::{opaque#0}`
-fn import_mapping_to_result_boxed(
-    mapping: Vc<ReplacedImportMapping>,
-    lookup_path: Vc<FileSystemPath>,
-    request: Vc<Request>,
-) -> Pin<Box<dyn Future<Output = Result<ImportMapResult>> + Send>> {
-    Box::pin(async move { import_mapping_to_result(mapping, lookup_path, request).await })
 }
 
 impl ImportMap {
@@ -448,14 +440,13 @@ impl ImportMap {
 impl ResolvedMap {
     #[turbo_tasks::function]
     pub async fn lookup(
-        self: Vc<Self>,
+        &self,
         resolved: Vc<FileSystemPath>,
         lookup_path: Vc<FileSystemPath>,
         request: Vc<Request>,
     ) -> Result<Vc<ImportMapResult>> {
-        let this = self.await?;
         let resolved = resolved.await?;
-        for (root, glob, mapping) in this.by_glob.iter() {
+        for (root, glob, mapping) in self.by_glob.iter() {
             let root = root.await?;
             if let Some(path) = root.get_path_to(&resolved) {
                 if glob.await?.execute(path) {
@@ -494,13 +485,15 @@ pub struct ResolveOptions {
     pub default_files: Vec<RcStr>,
     /// An import map to use before resolving a request.
     pub import_map: Option<Vc<ImportMap>>,
-    /// An import map to use when a request is otherwise unresolveable.
+    /// An import map to use when a request is otherwise unresolvable.
     pub fallback_import_map: Option<Vc<ImportMap>>,
     pub resolved_map: Option<Vc<ResolvedMap>>,
     pub before_resolve_plugins: Vec<Vc<Box<dyn BeforeResolvePlugin>>>,
     pub plugins: Vec<Vc<Box<dyn AfterResolvePlugin>>>,
     /// Support resolving *.js requests to *.ts files
     pub enable_typescript_with_output_extension: bool,
+    /// Warn instead of error for resolve errors
+    pub loose_errors: bool,
 
     pub placeholder_for_future_extensions: (),
 }

@@ -1,4 +1,4 @@
-import { defineQuery } from "groq";
+import { defineQuery } from "next-sanity";
 import type { Metadata, ResolvingMetadata } from "next";
 import { type PortableTextBlock } from "next-sanity";
 import Link from "next/link";
@@ -17,7 +17,7 @@ import { postQuery, settingsQuery } from "@/sanity/lib/queries";
 import { resolveOpenGraphImage } from "@/sanity/lib/utils";
 
 type Props = {
-  params: { slug: string };
+  params: Promise<{ slug: string }>;
 };
 
 const postSlugs = defineQuery(
@@ -36,7 +36,11 @@ export async function generateMetadata(
   { params }: Props,
   parent: ResolvingMetadata,
 ): Promise<Metadata> {
-  const post = await sanityFetch({ query: postQuery, params, stega: false });
+  const post = await sanityFetch({
+    query: postQuery,
+    params,
+    stega: false,
+  });
   const previousImages = (await parent).openGraph?.images || [];
   const ogImage = resolveOpenGraphImage(post?.coverImage);
 

@@ -43,6 +43,11 @@ impl BrowserChunkingContextBuilder {
         self
     }
 
+    pub fn use_file_source_map_uris(mut self) -> Self {
+        self.chunking_context.should_use_file_source_map_uris = true;
+        self
+    }
+
     pub fn asset_base_path(mut self, asset_base_path: Vc<Option<RcStr>>) -> Self {
         self.chunking_context.asset_base_path = asset_base_path;
         self
@@ -89,6 +94,7 @@ impl BrowserChunkingContextBuilder {
 }
 
 /// A chunking context for development mode.
+///
 /// It uses readable filenames and module ids to improve development.
 /// It also uses a chunking heuristic that is incremental and cacheable.
 /// It splits "node_modules" separately as these are less likely to change
@@ -100,6 +106,8 @@ pub struct BrowserChunkingContext {
     /// This path get stripped off of chunk paths before generating output asset
     /// paths.
     context_path: Vc<FileSystemPath>,
+    /// Whether to write file sources as file:// paths in source maps
+    should_use_file_source_map_uris: bool,
     /// This path is used to compute the url to request chunks from
     output_root: Vc<FileSystemPath>,
     /// This path is used to compute the url to request assets from
@@ -149,6 +157,7 @@ impl BrowserChunkingContext {
                 output_root,
                 client_root,
                 chunk_root_path,
+                should_use_file_source_map_uris: false,
                 reference_chunk_source_maps: true,
                 reference_css_chunk_source_maps: true,
                 asset_root_path,
@@ -350,15 +359,18 @@ impl ChunkingContext for BrowserChunkingContext {
     }
 
     #[turbo_tasks::function]
+    fn should_use_file_source_map_uris(&self) -> Vc<bool> {
+        Vc::cell(self.should_use_file_source_map_uris)
+    }
+
+    #[turbo_tasks::function]
     async fn chunk_group(
         self: Vc<Self>,
+        ident: Vc<AssetIdent>,
         module: Vc<Box<dyn ChunkableModule>>,
         availability_info: Value<AvailabilityInfo>,
     ) -> Result<Vc<ChunkGroupResult>> {
-        let span = tracing::info_span!(
-            "chunking",
-            module = module.ident().to_string().await?.to_string()
-        );
+        let span = tracing::info_span!("chunking", ident = ident.to_string().await?.to_string());
         async move {
             let this = self.await?;
             let input_availability_info = availability_info.into_value();
@@ -378,7 +390,7 @@ impl ChunkingContext for BrowserChunkingContext {
                 .collect();
 
             if this.enable_hot_module_replacement {
-                let mut ident = module.ident();
+                let mut ident = ident;
                 match input_availability_info {
                     AvailabilityInfo::Root => {}
                     AvailabilityInfo::Untracked => {
@@ -432,12 +444,9 @@ impl ChunkingContext for BrowserChunkingContext {
 
             let evaluatable_assets_ref = evaluatable_assets.await?;
 
-            // TODO this collect is unnecessary, but it hits a compiler bug when it's not
-            // used
             let entries = evaluatable_assets_ref
                 .iter()
-                .map(|&evaluatable| Vc::upcast(evaluatable))
-                .collect::<Vec<_>>();
+                .map(|&evaluatable| Vc::upcast(evaluatable));
 
             let MakeChunkGroupResult {
                 chunks,
@@ -483,17 +492,15 @@ impl ChunkingContext for BrowserChunkingContext {
         _path: Vc<FileSystemPath>,
         _module: Vc<Box<dyn Module>>,
         _evaluatable_assets: Vc<EvaluatableAssets>,
+        _extra_chunks: Vc<OutputAssets>,
         _availability_info: Value<AvailabilityInfo>,
     ) -> Result<Vc<EntryChunkGroupResult>> {
         bail!("Browser chunking context does not support entry chunk groups")
     }
 
     #[turbo_tasks::function]
-    async fn chunk_item_id_from_ident(
-        self: Vc<Self>,
-        ident: Vc<AssetIdent>,
-    ) -> Result<Vc<ModuleId>> {
-        Ok(self.await?.module_id_strategy.get_module_id(ident))
+    fn chunk_item_id_from_ident(&self, ident: Vc<AssetIdent>) -> Vc<ModuleId> {
+        self.module_id_strategy.get_module_id(ident)
     }
 
     #[turbo_tasks::function]

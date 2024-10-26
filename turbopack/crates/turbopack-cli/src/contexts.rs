@@ -1,13 +1,13 @@
-use std::{collections::HashMap, fmt};
+use std::fmt;
 
 use anyhow::Result;
-use turbo_tasks::{RcStr, Value, Vc};
+use turbo_tasks::{RcStr, ResolvedVc, Value, Vc};
 use turbo_tasks_fs::{FileSystem, FileSystemPath};
 use turbopack::{
     ecmascript::{EcmascriptInputTransform, TreeShakingMode},
     module_options::{
         EcmascriptOptionsContext, JsxTransformOptions, ModuleOptionsContext, ModuleRule,
-        ModuleRuleCondition, ModuleRuleEffect,
+        ModuleRuleEffect, RuleCondition,
     },
     ModuleAssetContext,
 };
@@ -50,7 +50,7 @@ async fn foreign_code_context_condition() -> Result<ContextCondition> {
 }
 
 #[turbo_tasks::function]
-pub async fn get_client_import_map(project_path: Vc<FileSystemPath>) -> Result<Vc<ImportMap>> {
+pub fn get_client_import_map(project_path: Vc<FileSystemPath>) -> Vc<ImportMap> {
     let mut import_map = ImportMap::empty();
 
     import_map.insert_singleton_alias("@swc/helpers", project_path);
@@ -67,7 +67,7 @@ pub async fn get_client_import_map(project_path: Vc<FileSystemPath>) -> Result<V
         .cell(),
     );
 
-    Ok(import_map.cell())
+    import_map.cell()
 }
 
 #[turbo_tasks::function]
@@ -98,8 +98,8 @@ pub async fn get_client_resolve_options_context(
 #[turbo_tasks::function]
 async fn get_client_module_options_context(
     project_path: Vc<FileSystemPath>,
-    execution_context: Vc<ExecutionContext>,
-    env: Vc<Environment>,
+    execution_context: ResolvedVc<ExecutionContext>,
+    env: ResolvedVc<Environment>,
     node_env: Vc<NodeEnv>,
 ) -> Result<Vc<ModuleOptionsContext>> {
     let module_options_context = ModuleOptionsContext {
@@ -126,11 +126,11 @@ async fn get_client_module_options_context(
 
     let versions = *env.runtime_versions().await?;
 
-    let conditions = ModuleRuleCondition::any(vec![
-        ModuleRuleCondition::ResourcePathEndsWith(".js".to_string()),
-        ModuleRuleCondition::ResourcePathEndsWith(".jsx".to_string()),
-        ModuleRuleCondition::ResourcePathEndsWith(".ts".to_string()),
-        ModuleRuleCondition::ResourcePathEndsWith(".tsx".to_string()),
+    let conditions = RuleCondition::any(vec![
+        RuleCondition::ResourcePathEndsWith(".js".to_string()),
+        RuleCondition::ResourcePathEndsWith(".jsx".to_string()),
+        RuleCondition::ResourcePathEndsWith(".ts".to_string()),
+        RuleCondition::ResourcePathEndsWith(".tsx".to_string()),
     ]);
 
     let module_rules = ModuleRule::new(
@@ -188,7 +188,7 @@ pub fn get_client_asset_context(
     );
 
     let asset_context: Vc<Box<dyn AssetContext>> = Vc::upcast(ModuleAssetContext::new(
-        Vc::cell(HashMap::new()),
+        Default::default(),
         compile_time_info,
         module_options_context,
         resolve_options_context,
